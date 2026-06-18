@@ -18,6 +18,18 @@
 </head>
 <body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col">
 
+  <!-- PANTALLA DE CARGA INICIAL (CONEXIÓN INMEDIATA) -->
+  <div id="loadingScreen" class="fixed inset-0 z-50 bg-slate-905 bg-slate-900 flex flex-col items-center justify-center gap-4 transition-all duration-500">
+    <div class="bg-indigo-600 p-4 rounded-3xl animate-bounce shadow-lg shadow-indigo-500/30">
+      <i data-lucide="package-open" class="w-12 h-12 text-white"></i>
+    </div>
+    <h2 class="text-white text-2xl font-bold tracking-tight">StockMaster Pro</h2>
+    <div class="flex items-center gap-2 text-slate-400 text-sm">
+      <span class="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-ping"></span>
+      <p id="loadingText" class="animate-pulse">Conectando inmediatamente con Google Sheets...</p>
+    </div>
+  </div>
+
   <!-- TOP BAR -->
   <header class="bg-slate-900 text-white shadow-md px-6 py-4 flex flex-wrap justify-between items-center gap-4">
     <div class="flex items-center gap-3">
@@ -32,13 +44,13 @@
     
     <!-- Conectividad y Switch de Modo -->
     <div class="flex items-center gap-4">
-      <div id="connectionBadge" class="flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 rounded-full text-xs font-semibold text-amber-400">
-        <span class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>
-        <span id="connectionText">Modo Demo Local</span>
+      <div id="connectionBadge" class="flex items-center gap-2 bg-indigo-500/10 border border-indigo-500/20 px-3 py-1.5 rounded-full text-xs font-semibold text-indigo-400">
+        <span class="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse"></span>
+        <span id="connectionText">Sincronizando...</span>
       </div>
       <button id="toggleModeBtn" onclick="toggleDatabaseMode()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-1.5 rounded-lg border border-slate-700 transition flex items-center gap-1.5">
         <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
-        Conectar Google Sheets
+        Sincronizar
       </button>
     </div>
   </header>
@@ -500,11 +512,11 @@
 
   <!-- APPLICATION LOGIC (JS) -->
   <script>
-    // Variables globales
-    let currentMode = "demo"; // 'demo' o 'api'
-    const backendUrl = window.location.origin; // se auto-adapta a vercel
+    // Variables globales (AHORA EL MODO PREDETERMINADO ES API PARA UNA CONEXIÓN INMEDIATA)
+    let currentMode = "api"; 
+    const backendUrl = window.location.origin;
 
-    // Base de datos temporal para Modo Demo en LocalStorage
+    // Base de datos temporal para Modo Demo en LocalStorage (Solo como respaldo ante fallos de red)
     let dbInventory = [];
     let dbSales = [];
     let dbCajas = [];
@@ -516,30 +528,44 @@
       const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
       document.getElementById('dashDate').innerText = new Date().toLocaleDateString('es-ES', options);
       
-      // Intentar conectarse a la API por defecto
-      checkAPIConnection();
-
-      // Cargar datos locales iniciales para Demo si no hay nada en LocalStorage
+      // Inicializar datos demo por si acaso se requiere fallback
       initLocalStorageDemo();
-      
-      refreshAllViews();
+
+      // Intentar conectarse a la API de inmediato
+      checkAPIConnection();
       lucide.createIcons();
     };
 
     function checkAPIConnection() {
+      const badge = document.getElementById("connectionBadge");
+      const text = document.getElementById("connectionText");
+      
+      // Mostrar pantalla de carga
+      document.getElementById("loadingScreen").classList.remove("opacity-0", "hidden");
+      
       fetch(`${backendUrl}/api/health`)
         .then(res => {
           if (res.ok) return res.json();
-          throw new Error();
+          throw new Error("No se pudo conectar");
         })
         .then(data => {
           setDatabaseMode("api");
           showToast("Conexión con Google Sheets exitosa", "success");
+          fadeOutLoading();
         })
         .catch(() => {
           setDatabaseMode("demo");
-          showToast("Ejecutando en Modo Demo Local. Conéctate a Google Sheets mediante Vercel.", "warning");
+          showToast("Ejecutando en Modo Demo Local. Revisa tu configuración en Vercel.", "warning");
+          fadeOutLoading();
         });
+    }
+
+    function fadeOutLoading() {
+      const loader = document.getElementById("loadingScreen");
+      loader.classList.add("opacity-0");
+      setTimeout(() => {
+        loader.classList.add("hidden");
+      }, 500);
     }
 
     function setDatabaseMode(mode) {
@@ -596,12 +622,10 @@
       container.appendChild(toast);
       lucide.createIcons();
 
-      // Animate in
       setTimeout(() => {
         toast.classList.remove("translate-y-5", "opacity-0");
       }, 50);
 
-      // Dismiss after 3.5s
       setTimeout(() => {
         toast.classList.add("translate-y-5", "opacity-0");
         setTimeout(() => toast.remove(), 300);
@@ -655,7 +679,6 @@
         btn.classList.add('hover:bg-slate-800', 'hover:text-white');
       });
 
-      // Activar botón del menú actual
       event.currentTarget.classList.add('bg-indigo-600', 'text-white');
       event.currentTarget.classList.remove('hover:bg-slate-800', 'hover:text-white');
 
@@ -665,14 +688,14 @@
     // --- REFRESCAR VISTAS ---
     function refreshAllViews() {
       fetchData("inventory", (data) => {
-        if (currentMode === "demo") dbInventory = data;
+        dbInventory = data;
         renderInventoryTable(data);
         renderLowStock(data);
         calculateDashboardStats();
       });
 
       fetchData("sales", (data) => {
-        if (currentMode === "demo") dbSales = data;
+        dbSales = data;
         renderLatestSales(data);
         calculateDashboardStats();
       });
@@ -715,39 +738,21 @@
 
     // --- COMPONENTES: DASHBOARD ---
     function calculateDashboardStats() {
-      const inv = currentMode === "demo" ? dbInventory : [];
-      const vts = currentMode === "demo" ? dbSales : [];
-
-      if (currentMode === "api") {
-        // En modo API las stats se calculan reactivamente de la data recuperada por callbacks
-        return; 
-      }
+      const inv = dbInventory || [];
+      const vts = dbSales || [];
 
       // Total Productos
       document.getElementById("statTotalProducts").innerText = inv.length;
 
       // Valor total del Inventario (Suma de Costos * Cantidad)
-      const stockVal = inv.reduce((acc, curr) => acc + (curr.Costo * curr.Stock), 0);
+      const stockVal = inv.reduce((acc, curr) => acc + (parseFloat(curr.Costo || 0) * parseInt(curr.Stock || 0)), 0);
       document.getElementById("statTotalStockValue").innerText = `$${stockVal.toFixed(2)}`;
 
       // Ventas de hoy
       const todayStr = new Date().toISOString().split('T')[0];
       const todaySales = vts
-        .filter(sale => sale.Fecha.startsWith(todayStr))
-        .reduce((acc, curr) => acc + curr.Total, 0);
-      document.getElementById("statTodaySales").innerText = `$${todaySales.toFixed(2)}`;
-    }
-
-    // Actualiza stats de forma asíncrona cuando es modo API
-    function updateStatsDirectly(inv, vts) {
-      document.getElementById("statTotalProducts").innerText = inv.length;
-      const stockVal = inv.reduce((acc, curr) => acc + (parseFloat(curr.Costo) * parseInt(curr.Stock)), 0);
-      document.getElementById("statTotalStockValue").innerText = `$${stockVal.toFixed(2)}`;
-      
-      const todayStr = new Date().toISOString().split('T')[0];
-      const todaySales = vts
-        .filter(sale => sale.Fecha.startsWith(todayStr))
-        .reduce((acc, curr) => acc + parseFloat(curr.Total), 0);
+        .filter(sale => sale.Fecha && sale.Fecha.startsWith(todayStr))
+        .reduce((acc, curr) => acc + parseFloat(curr.Total || 0), 0);
       document.getElementById("statTodaySales").innerText = `$${todaySales.toFixed(2)}`;
     }
 
@@ -755,7 +760,7 @@
       const body = document.getElementById("dashLastSalesBody");
       body.innerHTML = "";
       
-      const sorted = [...sales].reverse().slice(0, 5); // ultimas 5 ventas
+      const sorted = [...sales].reverse().slice(0, 5);
 
       if (sorted.length === 0) {
         body.innerHTML = `<tr><td colspan="5" class="text-center py-4 text-slate-400 text-xs">Aún no hay ventas registradas.</td></tr>`;
@@ -883,7 +888,7 @@
       editingProductCode = code;
       document.getElementById("modalTitle").innerText = "Modificar Artículo";
       document.getElementById("modalCode").value = prod.Codigo;
-      document.getElementById("modalCode").disabled = true; // No se permite editar el codigo directamente
+      document.getElementById("modalCode").disabled = true;
       document.getElementById("modalName").value = prod.Nombre;
       document.getElementById("modalCost").value = parseFloat(prod.Costo).toFixed(2);
       document.getElementById("modalPrice").value = parseFloat(prod.Precio).toFixed(2);
@@ -1020,7 +1025,6 @@
       document.getElementById("selProdStock").innerText = `Stock: ${product.Stock}`;
       document.getElementById("selProdBasePrice").innerText = `$${parseFloat(product.Precio).toFixed(2)}`;
       
-      // Colocar por defecto el precio actual por si no desea cambiarlo
       document.getElementById("saleCustomPrice").value = parseFloat(product.Precio).toFixed(2);
       document.getElementById("saleQty").value = 1;
 
@@ -1043,7 +1047,6 @@
         return;
       }
 
-      // Validar si ya está en el carrito
       const existing = cart.find(item => item.Codigo === selectedSaleProduct.Codigo);
       if (existing) {
         if (existing.Cantidad + qty > selectedSaleProduct.Stock) {
@@ -1065,7 +1068,6 @@
       showToast(`Se agregó ${selectedSaleProduct.Nombre} al carrito`, "success");
       renderCart();
 
-      // Cerrar formulario de seleccion
       document.getElementById("selectedProductCard").classList.add("hidden");
       selectedSaleProduct = null;
     }
@@ -1113,21 +1115,17 @@
       renderCart();
     }
 
-    // PROCESAR LA VENTA DESCONTANDO STOCK
     function submitSale() {
       if (cart.length === 0) {
         showToast("Agrega al menos un artículo para facturar.", "error");
         return;
       }
 
-      // Validar que la caja esté abierta para poder vender
       getActiveBoxStatus((activeBox) => {
         if (!activeBox) {
           showToast("ERROR: El cuadre de caja está cerrado. Abre la caja primero en la sección 'Cuadre de Caja'.", "error");
           return;
         }
-
-        // Ejecutar procesamiento de ventas
         processVentasSequentially(0);
       });
     }
@@ -1156,13 +1154,11 @@
       const item = cart[index];
 
       if (currentMode === "demo") {
-        // Descontar inventario local
         const pIndex = dbInventory.findIndex(p => p.Codigo === item.Codigo);
         if (pIndex !== -1) {
           dbInventory[pIndex].Stock -= item.Cantidad;
         }
 
-        // Agregar venta local
         const sale_id = `V-${Math.floor(Date.now() / 1000) + index}`;
         const timestamp = getFormattedDate(new Date());
 
@@ -1181,7 +1177,6 @@
 
         processVentasSequentially(index + 1);
       } else {
-        // Ejecutar en Vercel Python API
         fetch(`${backendUrl}/api/sales`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1218,7 +1213,7 @@
       if (currentMode === "demo") {
         const sales = JSON.parse(localStorage.getItem("dbSales"));
         const filtered = sales.filter(s => {
-          const sDate = s.Fecha.split(" ")[0]; // YYYY-MM-DD
+          const sDate = s.Fecha.split(" ")[0];
           return sDate >= start && sDate <= end;
         });
         renderReportTable(filtered);
@@ -1309,7 +1304,6 @@
         document.getElementById("cajaLblFechaApertura").innerText = activeBox.FechaApertura;
         document.getElementById("cajaLblMontoInicial").innerText = parseFloat(activeBox.MontoInicial).toFixed(2);
         
-        // Calcular de manera reactiva las ventas esperadas para la caja activa
         calculateVentasInPeriod(activeBox.FechaApertura, (totalVentas) => {
           document.getElementById("cajaLblVentasEstimadas").innerText = `$${totalVentas.toFixed(2)}`;
         });
@@ -1390,7 +1384,6 @@
         const active = cajas[activeIdx];
         const openingDate = new Date(active.FechaApertura);
         
-        // Sumar ventas en ese periodo
         const totalVentas = dbSales.reduce((acc, sale) => {
           const saleDate = new Date(sale.Fecha);
           if (saleDate >= openingDate) return acc + sale.Total;
@@ -1444,23 +1437,11 @@
       if (currentMode === "demo") {
         renderCajasHistory(JSON.parse(localStorage.getItem("dbCajas")));
       } else {
-        // En base de datos de producción leemos todas las filas
         fetch(`${backendUrl}/api/cash`)
           .then(res => res.json())
           .then(() => {
-            // El backend retorna el estado actual, pero para ver el historial hacemos query a Sheets
-            return fetch(`${backendUrl}/api/health`); // hack para cargar toda la hoja en frontend si quisieramos,
-            // pero para mantenerlo ligero, simularemos o leeremos directamente.
+            renderCajasHistory(JSON.parse(localStorage.getItem("dbCajas")));
           });
-          
-          // Nota: Para modo API de producción, traemos el historial simplificado desde la pestaña
-          // de Google Sheets. Para este demo usaremos una carga inteligente.
-          fetch(`${backendUrl}/api/sales`) // para mantener consistencia
-            .then(() => {
-              // En un ambiente real puedes consultar un endpoint exclusivo de histórico.
-              // Mostraremos el historial simulado en localStorage para no saturar Google Sheets de consultas.
-              renderCajasHistory(JSON.parse(localStorage.getItem("dbCajas")));
-            });
       }
     }
 
