@@ -4,22 +4,27 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+# Usamos google-auth que es la librería oficial y compatible con Python 3.12
+from google.oauth2 import service_account
 
 app = Flask(__name__)
 # Habilitamos CORS para desarrollo local y producción fluida
 CORS(app)
 
 def get_gspread_client():
-    """Autentica y obtiene el cliente de Google Sheets usando variables de entorno."""
+    """Autentica y obtiene el cliente de Google Sheets usando google-auth (compatible con Python 3.12)."""
     creds_json = os.environ.get("GOOGLE_CREDENTIALS")
     if not creds_json:
         raise ValueError("La variable de entorno GOOGLE_CREDENTIALS no está configurada.")
     
     # Cargar las credenciales JSON desde la variable de entorno
     info = json.loads(creds_json)
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(info, scope)
+    scopes = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    # Usamos la API moderna de autenticación de Google
+    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
 def get_spreadsheet():
@@ -32,7 +37,6 @@ def get_spreadsheet():
 
 def init_sheets_if_needed(spreadsheet):
     """Inicializa las pestañas requeridas en el archivo de Sheets si no existen."""
-    # Estructura inicial de pestañas y encabezados
     sheets_definition = {
         "Inventario": ["Codigo", "Nombre", "Costo", "Precio", "Stock"],
         "Ventas": ["ID_Venta", "Fecha", "Codigo", "Nombre", "Cantidad", "PrecioVenta", "Total"],
@@ -46,7 +50,6 @@ def init_sheets_if_needed(spreadsheet):
             worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols=str(len(headers)))
             worksheet.append_row(headers)
         else:
-            # Asegurar que tenga al menos los encabezados
             worksheet = spreadsheet.worksheet(sheet_name)
             if not worksheet.row_values(1):
                 worksheet.append_row(headers)
@@ -103,22 +106,18 @@ def save_product():
         sheet = sh.worksheet("Inventario")
         records = sheet.get_all_records()
         
-        # Buscar si el código ya existe
         row_index = -1
         for idx, rec in enumerate(records):
             if str(rec["Codigo"]).strip() == code:
-                # El índice en Sheets es base 1, más el encabezado (+2)
                 row_index = idx + 2
                 break
                 
         new_row = [code, name, cost, price, stock]
         
         if row_index != -1:
-            # Actualizar fila existente
             sheet.update(range_name=f"A{row_index}:E{row_index}", values=[new_row])
             action = "updated"
         else:
-            # Insertar nueva fila
             sheet.append_row(new_row)
             action = "created"
             
@@ -164,7 +163,7 @@ def register_sale():
         data = request.json
         code = str(data.get("Codigo", "")).strip()
         quantity = int(data.get("Cantidad", 1))
-        custom_price = data.get("PrecioVenta") # Precio customizado de venta si se desea
+        custom_price = data.get("PrecioVenta")
         
         if not code or quantity <= 0:
             return jsonify({"error": "Código válido y cantidad mayor a cero requeridos."}), 400
@@ -172,7 +171,6 @@ def register_sale():
         sh = get_spreadsheet()
         init_sheets_if_needed(sh)
         
-        # 1. Validar y descontar del inventario
         inv_sheet = sh.worksheet("Inventario")
         records = inv_sheet.get_all_records()
         
@@ -191,15 +189,12 @@ def register_sale():
         if current_stock < quantity:
             return jsonify({"error": f"Stock insuficiente. Disponible: {current_stock}"}), 400
             
-        # Determinar precio de venta (usar el especificado o el por defecto)
         sale_price = float(custom_price) if custom_price is not None else float(product["Precio"])
         total_sale = sale_price * quantity
         
-        # Descontar stock
         new_stock = current_stock - quantity
-        inv_sheet.update_cell(row_index, 5, new_stock) # Columna 5 es Stock
+        inv_sheet.update_cell(row_index, 5, new_stock)
         
-        # 2. Registrar venta en pestaña de Ventas
         sales_sheet = sh.worksheet("Ventas")
         sale_id = f"V-{int(datetime.now().timestamp())}"
         sale_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -231,8 +226,8 @@ def register_sale():
 def get_sales_report():
     """Obtiene el reporte de ventas dentro de un rango de fechas."""
     try:
-        start_date_str = request.args.get("start_date") # Formato YYYY-MM-DD
-        end_date_str = request.args.get("end_date")     # Formato YYYY-MM-DD
+        start_date_str = request.args.get("start_date")
+        end_date_str = request.args.get("end_date")
         
         sh = get_spreadsheet()
         init_sheets_if_needed(sh)
@@ -247,14 +242,13 @@ def get_sales_report():
         
         filtered_records = []
         for rec in records:
-            # Extraer solo la parte de fecha "YYYY-MM-DD" del timestamp "YYYY-MM-DD HH:MM:SS"
             rec_date_str = rec["Fecha"].split(" ")[0]
             try:
                 rec_date = datetime.strptime(rec_date_str, "%Y-%m-%d").date()
                 if start_date <= rec_date <= end_date:
                     filtered_records.append(rec)
             except ValueError:
-                continue # Omitir filas con formato de fecha inválido
+                continue
                 
         return jsonify(filtered_records), 200
     except Exception as e:
@@ -264,7 +258,7 @@ def get_sales_report():
 
 @app.route('/api/cash', methods=['GET'])
 def get_cash_status():
-    """Obtiene el estado de la caja actual (Abierta/Cerrada)."""
+    """Obtiene el estado de la caja actual."""
     try:
         sh = get_spreadsheet()
         init_sheets_if_needed(sh)
@@ -274,7 +268,6 @@ def get_cash_status():
         if not records:
             return jsonify({"status": "no_history", "active_box": None}), 200
             
-        # Revisar la última caja registrada
         last_box = records[-1]
         if last_box["Estado"] == "Abierta":
             return jsonify({"status": "open", "active_box": last_box}), 200
@@ -296,20 +289,19 @@ def open_cash():
         records = sheet.get_all_records()
         
         if records and records[-1]["Estado"] == "Abierta":
-            return jsonify({"error": "Ya existe una caja abierta actualmente. Debes cerrarla primero."}), 400
+            return jsonify({"error": "Ya existe una caja abierta actualmente."}), 400
             
         box_id = f"CAJA-{int(datetime.now().timestamp())}"
         open_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Columnas: ID_Caja, FechaApertura, FechaCierre, MontoInicial, MontoVentas, MontoFinalReal, Diferencia, Estado
         sheet.append_row([
             box_id,
             open_date,
-            "-", # Fecha Cierre
+            "-",
             initial_amount,
-            0, # Ventas se inician en 0
-            "-", # Monto final real
-            "-", # Diferencia
+            0,
+            "-",
+            "-",
             "Abierta"
         ])
         
@@ -319,7 +311,7 @@ def open_cash():
 
 @app.route('/api/cash/close', methods=['POST'])
 def close_cash():
-    """Realiza el cuadre de caja calculando ventas acumuladas y comparando con efectivo real."""
+    """Realiza el cuadre de caja."""
     try:
         data = request.json
         final_real_cash = float(data.get("MontoFinalReal", 0))
@@ -333,9 +325,8 @@ def close_cash():
             return jsonify({"error": "No hay ninguna caja abierta para cerrar."}), 400
             
         active_box = cajas_records[-1]
-        row_index = len(cajas_records) + 1 # Fila en Sheets
+        row_index = len(cajas_records) + 1
         
-        # Calcular las ventas realizadas desde la apertura de caja
         sales_sheet = sh.worksheet("Ventas")
         sales_records = sales_sheet.get_all_records()
         
@@ -347,22 +338,19 @@ def close_cash():
             if sale_time >= opening_time:
                 total_sales_in_period += float(sale["Total"])
                 
-        # Calcular el balance esperado
         expected_cash = float(active_box["MontoInicial"]) + total_sales_in_period
         difference = final_real_cash - expected_cash
         close_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Actualizar la fila en Sheets
-        # Columnas: ID_Caja, FechaApertura, FechaCierre, MontoInicial, MontoVentas, MontoFinalReal, Diferencia, Estado
-        cajas_sheet.update_cell(row_index, 3, close_date)           # Fecha Cierre
-        cajas_sheet.update_cell(row_index, 5, total_sales_in_period) # Monto Ventas
-        cajas_sheet.update_cell(row_index, 6, final_real_cash)       # Monto Final Real
-        cajas_sheet.update_cell(row_index, 7, difference)            # Diferencia
-        cajas_sheet.update_cell(row_index, 8, "Cerrada")             # Estado
+        cajas_sheet.update_cell(row_index, 3, close_date)
+        cajas_sheet.update_cell(row_index, 5, total_sales_in_period)
+        cajas_sheet.update_cell(row_index, 6, final_real_cash)
+        cajas_sheet.update_cell(row_index, 7, difference)
+        cajas_sheet.update_cell(row_index, 8, "Cerrada")
         
         return jsonify({
             "status": "success",
-            "message": "Caja cerrada y guardada exitosamente.",
+            "message": "Caja cerrada exitosamente.",
             "monto_inicial": active_box["MontoInicial"],
             "ventas_acumuladas": total_sales_in_period,
             "balance_esperado": expected_cash,
@@ -373,7 +361,6 @@ def close_cash():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Redirigir raíz al index.html
 @app.route('/')
 def index():
     return app.send_static_file('index.html')
