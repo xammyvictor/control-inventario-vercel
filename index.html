@@ -19,7 +19,7 @@
 <body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col">
 
   <!-- PANTALLA DE CARGA INICIAL (CONEXIÓN INMEDIATA) -->
-  <div id="loadingScreen" class="fixed inset-0 z-50 bg-slate-905 bg-slate-900 flex flex-col items-center justify-center gap-4 transition-all duration-500">
+  <div id="loadingScreen" class="fixed inset-0 z-50 bg-slate-900 flex flex-col items-center justify-center gap-4 transition-all duration-500">
     <div class="bg-indigo-600 p-4 rounded-3xl animate-bounce shadow-lg shadow-indigo-500/30">
       <i data-lucide="package-open" class="w-12 h-12 text-white"></i>
     </div>
@@ -512,26 +512,29 @@
 
   <!-- APPLICATION LOGIC (JS) -->
   <script>
-    // Variables globales (AHORA EL MODO PREDETERMINADO ES API PARA UNA CONEXIÓN INMEDIATA)
+    // Variables globales
     let currentMode = "api"; 
     const backendUrl = window.location.origin;
 
-    // Base de datos temporal para Modo Demo en LocalStorage (Solo como respaldo ante fallos de red)
+    // Memoria caché para evitar saturación de Google Sheets (Vence a los 12 segundos)
+    let apiCache = {
+      inventory: { data: null, lastFetched: 0 },
+      sales: { data: null, lastFetched: 0 },
+      cash: { data: null, lastFetched: 0 }
+    };
+    const CACHE_DURATION = 12000; 
+
+    // Base de datos temporal para Modo Demo en LocalStorage
     let dbInventory = [];
     let dbSales = [];
     let dbCajas = [];
     let cart = [];
 
-    // Carga de la aplicación al iniciar
     window.onload = function() {
-      // Inicializar fecha
       const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
       document.getElementById('dashDate').innerText = new Date().toLocaleDateString('es-ES', options);
       
-      // Inicializar datos demo por si acaso se requiere fallback
       initLocalStorageDemo();
-
-      // Intentar conectarse a la API de inmediato
       checkAPIConnection();
       lucide.createIcons();
     };
@@ -540,7 +543,6 @@
       const badge = document.getElementById("connectionBadge");
       const text = document.getElementById("connectionText");
       
-      // Mostrar pantalla de carga
       document.getElementById("loadingScreen").classList.remove("opacity-0", "hidden");
       
       fetch(`${backendUrl}/api/health`)
@@ -555,7 +557,7 @@
         })
         .catch(() => {
           setDatabaseMode("demo");
-          showToast("Ejecutando en Modo Demo Local. Revisa tu configuración en Vercel.", "warning");
+          showToast("Ejecutando en Modo Demo Local.", "warning");
           fadeOutLoading();
         });
     }
@@ -615,10 +617,7 @@
         info: `<i data-lucide="info" class="w-5 h-5"></i>`
       };
 
-      toast.innerHTML = `
-        ${icons[type]}
-        <div>${message}</div>
-      `;
+      toast.innerHTML = `${icons[type]}<div>${message}</div>`;
       container.appendChild(toast);
       lucide.createIcons();
 
@@ -669,7 +668,7 @@
       return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
     }
 
-    // --- TAB SWITCHER ---
+    // --- TAB SWITCHER CON LAZY LOADING ---
     function switchTab(tabId) {
       document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
       document.getElementById(`tab-${tabId}`).classList.remove('hidden');
@@ -679,36 +678,57 @@
         btn.classList.add('hover:bg-slate-800', 'hover:text-white');
       });
 
-      event.currentTarget.classList.add('bg-indigo-600', 'text-white');
-      event.currentTarget.classList.remove('hover:bg-slate-800', 'hover:text-white');
+      if (event && event.currentTarget) {
+        event.currentTarget.classList.add('bg-indigo-600', 'text-white');
+        event.currentTarget.classList.remove('hover:bg-slate-800', 'hover:text-white');
+      }
 
-      refreshAllViews();
+      loadTabData(tabId);
     }
 
-    // --- REFRESCAR VISTAS ---
-    function refreshAllViews() {
-      fetchData("inventory", (data) => {
-        dbInventory = data;
-        renderInventoryTable(data);
-        renderLowStock(data);
-        calculateDashboardStats();
-      });
-
-      fetchData("sales", (data) => {
-        dbSales = data;
-        renderLatestSales(data);
-        calculateDashboardStats();
-      });
-
-      fetchData("cash", (data) => {
-        updateCajaUI(data);
-      });
-
-      fetchCajasHistory();
+    function loadTabData(tabId) {
+      if (tabId === 'dashboard') {
+        fetchData("inventory", (data) => {
+          dbInventory = data;
+          renderLowStock(data);
+          calculateDashboardStats();
+        });
+        fetchData("sales", (data) => {
+          dbSales = data;
+          renderLatestSales(data);
+          calculateDashboardStats();
+        });
+        fetchData("cash", (data) => {
+          updateCajaUI(data);
+        });
+      } else if (tabId === 'inventario') {
+        fetchData("inventory", (data) => {
+          dbInventory = data;
+          renderInventoryTable(data);
+        });
+      } else if (tabId === 'ventas') {
+        fetchData("inventory", (data) => {
+          dbInventory = data;
+        });
+        fetchData("cash", (data) => {
+          updateCajaUI(data);
+        });
+      } else if (tabId === 'reportes') {
+        fetchData("sales", (data) => {
+          dbSales = data;
+        });
+      } else if (tabId === 'caja') {
+        fetchData("cash", (data) => {
+          updateCajaUI(data);
+          if (data && data.history) {
+            renderCajasHistory(data.history);
+          }
+        });
+      }
     }
 
-    // --- MANEJO DE APIS GENÉRICO (CON FALLBACK A DEMO LOCAL) ---
-    function fetchData(endpoint, callback) {
+    // --- CAPA DE CONTROL DE API CON CACHÉ ---
+    function fetchData(endpoint, callback, forceRefresh = false) {
       if (currentMode === "demo") {
         if (endpoint === "inventory") {
           callback(JSON.parse(localStorage.getItem("dbInventory")));
@@ -718,21 +738,47 @@
           const cajas = JSON.parse(localStorage.getItem("dbCajas"));
           const last = cajas.length ? cajas[cajas.length - 1] : null;
           if (last && last.Estado === "Abierta") {
-            callback({ status: "open", active_box: last });
+            callback({ status: "open", active_box: last, history: cajas });
           } else {
-            callback({ status: "closed", active_box: null, last_box: last });
+            callback({ status: "closed", active_box: null, last_box: last, history: cajas });
           }
         }
-      } else {
-        fetch(`${backendUrl}/api/${endpoint}`)
-          .then(res => {
-            if (!res.ok) throw new Error();
-            return res.json();
-          })
-          .then(data => callback(data))
-          .catch(() => {
-            showToast("Error consultando el servidor. Revisa tu backend en Vercel.", "error");
-          });
+        return;
+      }
+
+      const now = Date.now();
+      if (!forceRefresh && apiCache[endpoint] && apiCache[endpoint].data && (now - apiCache[endpoint].lastFetched < CACHE_DURATION)) {
+        callback(apiCache[endpoint].data);
+        return;
+      }
+
+      fetch(`${backendUrl}/api/${endpoint}`)
+        .then(res => {
+          if (!res.ok) throw new Error();
+          return res.json();
+        })
+        .then(data => {
+          if (apiCache[endpoint]) {
+            apiCache[endpoint].data = data;
+            apiCache[endpoint].lastFetched = now;
+          }
+          callback(data);
+        })
+        .catch(() => {
+          showToast("Error consultando el servidor. Revisa tu backend en Vercel.", "error");
+        });
+    }
+
+    function refreshAllViews() {
+      // Forzar borrado de caché
+      apiCache.inventory.lastFetched = 0;
+      apiCache.sales.lastFetched = 0;
+      apiCache.cash.lastFetched = 0;
+
+      const visibleTab = document.querySelector('.tab-content:not(.hidden)');
+      if (visibleTab) {
+        const tabId = visibleTab.id.replace('tab-', '');
+        loadTabData(tabId);
       }
     }
 
@@ -741,14 +787,11 @@
       const inv = dbInventory || [];
       const vts = dbSales || [];
 
-      // Total Productos
       document.getElementById("statTotalProducts").innerText = inv.length;
 
-      // Valor total del Inventario (Suma de Costos * Cantidad)
       const stockVal = inv.reduce((acc, curr) => acc + (parseFloat(curr.Costo || 0) * parseInt(curr.Stock || 0)), 0);
       document.getElementById("statTotalStockValue").innerText = `$${stockVal.toFixed(2)}`;
 
-      // Ventas de hoy
       const todayStr = new Date().toISOString().split('T')[0];
       const todaySales = vts
         .filter(sale => sale.Fecha && sale.Fecha.startsWith(todayStr))
@@ -1131,16 +1174,13 @@
     }
 
     function getActiveBoxStatus(callback) {
-      if (currentMode === "demo") {
-        const cajas = JSON.parse(localStorage.getItem("dbCajas"));
-        const active = cajas.find(c => c.Estado === "Abierta");
-        callback(active);
-      } else {
-        fetch(`${backendUrl}/api/cash`)
-          .then(res => res.json())
-          .then(data => callback(data.active_box))
-          .catch(() => callback(null));
-      }
+      fetchData("cash", (data) => {
+        if (data && data.status === "open") {
+          callback(data.active_box);
+        } else {
+          callback(null);
+        }
+      });
     }
 
     function processVentasSequentially(index) {
@@ -1434,15 +1474,11 @@
     }
 
     function fetchCajasHistory() {
-      if (currentMode === "demo") {
-        renderCajasHistory(JSON.parse(localStorage.getItem("dbCajas")));
-      } else {
-        fetch(`${backendUrl}/api/cash`)
-          .then(res => res.json())
-          .then(() => {
-            renderCajasHistory(JSON.parse(localStorage.getItem("dbCajas")));
-          });
-      }
+      fetchData("cash", (data) => {
+        if (data && data.history) {
+          renderCajasHistory(data.history);
+        }
+      });
     }
 
     function renderCajasHistory(cajas) {
